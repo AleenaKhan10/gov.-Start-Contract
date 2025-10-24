@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  scraper-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scraper-api
+    ports:
+      - "3456:3456"
+    environment:
+      - NODE_ENV=production
+      - TZ=America/New_York
+    restart: unless-stopped
+    volumes:
+      # Optional: Mount logs directory
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3456/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - scraper-network
+
+networks:
+  scraper-network:
+    driver: bridge

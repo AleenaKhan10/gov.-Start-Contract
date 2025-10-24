@@ -1,0 +1,15 @@
+{
+  "name": "caleprocure-cookie-fetcher",
+  "version": "1.0.0",
+  "description": "Puppeteer script to fetch fresh cookies from California eProcure",
+  "main": "get_cookies.js",
+  "scripts": {
+    "get-cookies": "node get_cookies.js",
+    "start-api": "node cookie_api.js",
+    "start-manager": "node cookie_manager_api.js"
+  },
+  "dependencies": {
+    "puppeteer": "^24.15.0",
+    "express": "^4.18.2"
+  }
+}
