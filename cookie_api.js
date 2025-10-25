@@ -123,6 +123,10 @@ app.get('/scrape-nyscr', async (req, res) => {
             const allText = document.body.innerText;
             const ads = [];
 
+            // Extract IDs from login.cfm URLs
+            const htmlContent = document.body.innerHTML;
+            const idMatches = [...htmlContent.matchAll(/login\.cfm\?ID=([A-F0-9\-]+)/gi)];
+
             // Use global regex to find all occurrences
             const titleMatches = [...allText.matchAll(/Title:\s*([^\n]+)/g)];
             const agencyMatches = [...allText.matchAll(/Agency:\s*([^\n]+)/g)];
@@ -136,12 +140,14 @@ app.get('/scrape-nyscr', async (req, res) => {
             const adCount = Math.max(
                 titleMatches.length,
                 agencyMatches.length,
-                issueDateMatches.length
+                issueDateMatches.length,
+                idMatches.length
             );
 
             // Extract each ad's data
             for (let i = 0; i < adCount; i++) {
                 ads.push({
+                    id: idMatches[i] ? idMatches[i][1] : '',
                     title: titleMatches[i] ? titleMatches[i][1].trim() : '',
                     agency: agencyMatches[i] ? agencyMatches[i][1].trim() : '',
                     issueDate: issueDateMatches[i] ? issueDateMatches[i][1].trim() : '',
