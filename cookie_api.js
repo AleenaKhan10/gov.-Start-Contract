@@ -524,16 +524,26 @@ app.get('/scrape-txsmartbuy-complete', async (req, res) => {
     let totalProcessed = 0;
 
     try {
-        // Step 1: Fetch list of solicitations
+        // Step 1: Fetch list of solicitations WITH PROXY
         console.log(`Fetching solicitation list for page ${page}...`);
 
         const listUrl = `https://www.txsmartbuy.gov/esbd?page=${page}`;
+        const proxy = getProxy();
+
         let browser = await puppeteer.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--disable-gpu']
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--disable-gpu',
+                `--proxy-server=${proxy.server}`
+            ]
         });
 
         let pageObj = await browser.newPage();
+        await pageObj.authenticate({ username: proxy.username, password: proxy.password });
         await pageObj.setViewport({ width: 1920, height: 1080 });
         await pageObj.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36');
 
