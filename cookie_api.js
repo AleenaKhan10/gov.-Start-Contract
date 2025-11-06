@@ -523,34 +523,44 @@ app.get('/scrape-txsmartbuy-complete', async (req, res) => {
     const errors = [];
     let totalProcessed = 0;
 
+    let browser;
+    let solicitations = [];
+
     try {
-        // Step 1: Fetch list of solicitations WITH PROXY
+        // Step 1: Fetch list of solicitations WITH PROXY AND RETRY
         console.log(`Fetching solicitation list for page ${page}...`);
 
         const listUrl = `https://www.txsmartbuy.gov/esbd?page=${page}`;
-        const proxy = getProxy();
+        const MAX_LIST_RETRIES = 3;
+        let listRetryCount = 0;
+        let listSuccess = false;
 
-        let browser = await puppeteer.launch({
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--disable-gpu',
-                `--proxy-server=${proxy.server}`
-            ]
-        });
+        while (!listSuccess && listRetryCount < MAX_LIST_RETRIES) {
+            try {
+                const proxy = getProxy();
+                console.log(`Attempting to fetch list (attempt ${listRetryCount + 1}/${MAX_LIST_RETRIES})...`);
 
-        let pageObj = await browser.newPage();
-        await pageObj.authenticate({ username: proxy.username, password: proxy.password });
-        await pageObj.setViewport({ width: 1920, height: 1080 });
-        await pageObj.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36');
+                browser = await puppeteer.launch({
+                    headless: true,
+                    args: [
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu',
+                        `--proxy-server=${proxy.server}`
+                    ]
+                });
 
-        await pageObj.goto(listUrl, { waitUntil: 'networkidle2', timeout: 300000 });
-        await new Promise(resolve => setTimeout(resolve, 8000));
+                let pageObj = await browser.newPage();
+                await pageObj.authenticate({ username: proxy.username, password: proxy.password });
+                await pageObj.setViewport({ width: 1920, height: 1080 });
+                await pageObj.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36');
 
-        const solicitations = await pageObj.evaluate(() => {
+                await pageObj.goto(listUrl, { waitUntil: 'networkidle2', timeout: 300000 });
+                await new Promise(resolve => setTimeout(resolve, 8000));
+
+                solicitations = await pageObj.evaluate(() => {
             const results = [];
             const allText = document.body.innerText;
             const blocks = allText.split(/Solicitation ID:/);
@@ -596,9 +606,37 @@ app.get('/scrape-txsmartbuy-complete', async (req, res) => {
                 });
             }
             return results;
-        });
+                });
 
-        await browser.close();
+                await browser.close();
+                listSuccess = true;
+                console.log(`Successfully fetched ${solicitations.length} solicitations`);
+
+            } catch (listError) {
+                console.error(`Error fetching list (attempt ${listRetryCount + 1}):`, listError.message);
+
+                try { if (browser) await browser.close(); } catch (e) {}
+
+                // Check if this is a timeout error
+                if (isTimeoutError(listError.message)) {
+                    console.log(`Timeout detected while fetching list. Rotating proxy...`);
+                    rotateProxy();
+
+                    listRetryCount++;
+                    if (listRetryCount < MAX_LIST_RETRIES) {
+                        console.log(`Retrying with new proxy in 3 seconds...`);
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        continue;
+                    } else {
+                        throw new Error(`Failed to fetch solicitation list after ${MAX_LIST_RETRIES} attempts: ${listError.message}`);
+                    }
+                } else {
+                    // Non-timeout error, don't retry
+                    throw listError;
+                }
+            }
+        }
+
         console.log(`Found ${solicitations.length} solicitations`);
 
         // Filter solicitations by date (skip those older than 6 months)
