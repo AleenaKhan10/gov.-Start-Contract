@@ -9,7 +9,10 @@
     "start-manager": "node cookie_manager_api.js"
   },
   "dependencies": {
-    "puppeteer": "^24.15.0",
-    "express": "^4.18.2"
+    "axios": "^1.13.1",
+    "express": "^4.18.2",
+    "https-proxy-agent": "^7.0.6",
+    "playwright": "^1.56.1",
+    "puppeteer": "^24.15.0"
   }
 }

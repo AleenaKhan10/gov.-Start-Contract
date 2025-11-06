@@ -6,6 +6,43 @@ const PORT = 3456;
 
 app.use(express.json());
 
+// Residential Proxy configuration (Oxylabs)
+const PROXY_HOST = 'pr.oxylabs.io';
+const PROXY_PORT = 7777;
+const PROXY_BASE_USERNAME = 'customer-govscout_S8lKq';
+const PROXY_PASSWORD = 'caz3vak3WXG+rjh8yqr';
+const PROXY_COUNTRY = 'US';
+
+// Track current proxy session
+let currentProxySession = Date.now();
+
+// Get proxy configuration with session ID for rotation
+function getProxy() {
+    const username = `${PROXY_BASE_USERNAME}-cc-${PROXY_COUNTRY}-sessid-${currentProxySession}`;
+    return {
+        server: `${PROXY_HOST}:${PROXY_PORT}`,
+        username: username,
+        password: PROXY_PASSWORD
+    };
+}
+
+// Rotate proxy by changing session ID
+function rotateProxy() {
+    currentProxySession = Date.now();
+    console.log(`[${new Date().toISOString()}] Proxy rotated. New session: ${currentProxySession}`);
+    return getProxy();
+}
+
+// Check if error is a timeout error
+function isTimeoutError(errorMessage) {
+    return errorMessage && (
+        errorMessage.includes('ERR_TIMED_OUT') ||
+        errorMessage.includes('TimeoutError') ||
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('Navigation timeout')
+    );
+}
+
 // Health check
 app.get('/', (req, res) => {
     res.json({
@@ -15,7 +52,8 @@ app.get('/', (req, res) => {
             '/get-cookies': 'GET - Fetch fresh cookies from California eProcure',
             '/scrape-nyscr': 'GET - Scrape NY State Contract Reporter ads (query param: startnum)',
             '/scrape-txsmartbuy-list': 'GET - Scrape Texas SmartBuy solicitations list (query param: page)',
-            '/scrape-txsmartbuy-detail': 'GET - Scrape Texas SmartBuy solicitation details (query param: id)'
+            '/scrape-txsmartbuy-detail': 'GET - Scrape Texas SmartBuy solicitation details (query param: id)',
+            '/scrape-txsmartbuy-complete': 'GET - Scrape Texas SmartBuy page with all details using proxy (query params: page, limit)'
         }
     });
 });
@@ -456,6 +494,234 @@ app.get('/scrape-txsmartbuy-detail', async (req, res) => {
     }
 });
 
+// Texas SmartBuy complete scraper endpoint (list + details with residential proxy)
+app.get('/scrape-txsmartbuy-complete', async (req, res) => {
+    const page = req.query.page || '1';
+    const limit = req.query.limit ? parseInt(req.query.limit) : null;
+
+    console.log(`[${new Date().toISOString()}] Texas SmartBuy COMPLETE scrape for page: ${page}${limit ? ` (limit: ${limit})` : ' (all records)'}`);
+
+    const results = [];
+    const errors = [];
+    let totalProcessed = 0;
+
+    try {
+        // Step 1: Fetch list of solicitations
+        console.log(`Fetching solicitation list for page ${page}...`);
+
+        const listUrl = `https://www.txsmartbuy.gov/esbd?page=${page}`;
+        let browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--disable-gpu']
+        });
+
+        let pageObj = await browser.newPage();
+        await pageObj.setViewport({ width: 1920, height: 1080 });
+        await pageObj.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36');
+
+        await pageObj.goto(listUrl, { waitUntil: 'networkidle2', timeout: 300000 });
+        await new Promise(resolve => setTimeout(resolve, 8000));
+
+        const solicitations = await pageObj.evaluate(() => {
+            const results = [];
+            const allText = document.body.innerText;
+            const blocks = allText.split(/Solicitation ID:/);
+
+            for (let i = 1; i < blocks.length; i++) {
+                const block = blocks[i];
+                const lines = block.split('\n').map(l => l.trim()).filter(l => l);
+                if (lines.length === 0) continue;
+
+                const solicitationId = lines[0].trim();
+                const extractFromBlock = (fieldName) => {
+                    for (const line of lines) {
+                        if (line.startsWith(fieldName + ':')) {
+                            return line.substring(fieldName.length + 1).trim();
+                        }
+                    }
+                    return '';
+                };
+
+                let title = '';
+                if (i > 0) {
+                    const prevBlock = blocks[i - 1];
+                    const prevLines = prevBlock.split('\n').map(l => l.trim()).filter(l => l);
+                    for (let j = prevLines.length - 1; j >= 0; j--) {
+                        const line = prevLines[j];
+                        if (line && !line.includes(':') && !line.includes('|')) {
+                            title = line;
+                            break;
+                        }
+                    }
+                }
+
+                results.push({
+                    solicitationId: solicitationId,
+                    title: title,
+                    dueDate: extractFromBlock('Due Date'),
+                    dueTime: extractFromBlock('Due Time'),
+                    agency: extractFromBlock('Agency/Texas SmartBuy Member Number'),
+                    status: extractFromBlock('Status'),
+                    postingDate: extractFromBlock('Posting Date'),
+                    createdDate: extractFromBlock('Created Date'),
+                    lastUpdated: extractFromBlock('Last Updated')
+                });
+            }
+            return results;
+        });
+
+        await browser.close();
+        console.log(`Found ${solicitations.length} solicitations`);
+
+        const solicitationsToProcess = limit ? solicitations.slice(0, limit) : solicitations;
+        console.log(`Processing ${solicitationsToProcess.length} solicitations with proxy...`);
+
+        // Step 2: Fetch details for each solicitation with proxy
+        let consecutiveTimeouts = 0;
+        const MAX_RETRIES = 2;
+
+        for (let i = 0; i < solicitationsToProcess.length; i++) {
+            const solicitation = solicitationsToProcess[i];
+            const solicitationId = solicitation.solicitationId;
+            let retryCount = 0;
+            let success = false;
+
+            while (!success && retryCount < MAX_RETRIES) {
+                try {
+                    const proxy = getProxy();
+                    console.log(`[${i + 1}/${solicitationsToProcess.length}] Fetching details for: ${solicitationId}${retryCount > 0 ? ` (Retry ${retryCount})` : ''}`);
+
+                    browser = await puppeteer.launch({
+                        headless: true,
+                        args: [
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-accelerated-2d-canvas',
+                            '--disable-gpu',
+                            `--proxy-server=${proxy.server}`
+                        ]
+                    });
+
+                    pageObj = await browser.newPage();
+                    await pageObj.authenticate({ username: proxy.username, password: proxy.password });
+                    await pageObj.setViewport({ width: 1920, height: 1080 });
+                    await pageObj.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36');
+
+                    await pageObj.goto(`https://www.txsmartbuy.gov/esbd/${solicitationId}`, { waitUntil: 'domcontentloaded', timeout: 300000 });
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+
+                    const detailData = await pageObj.evaluate(() => {
+                        const allText = document.body.innerText;
+                        const data = {};
+
+                        const extractField = (fieldName) => {
+                            const regex = new RegExp(fieldName + ':\\s*([^\\n]+)', 'i');
+                            const match = allText.match(regex);
+                            return match ? match[1].trim() : '';
+                        };
+
+                        data.solicitationId = extractField('Solicitation ID');
+                        data.status = extractField('Status');
+                        data.contactName = extractField('Contact Name');
+                        data.contactNumber = extractField('Contact Number');
+                        data.contactEmail = extractField('Contact Email');
+                        data.responseDueDate = extractField('Response Due Date');
+                        data.responseDueTime = extractField('Response Due Time');
+                        data.agency = extractField('Agency/Texas SmartBuy Member Number');
+                        data.postingRequirement = extractField('Posting Requirement');
+                        data.solicitationPostingDate = extractField('Solicitation Posting Date');
+                        data.lastModified = extractField('Last Modified');
+                        data.classItemCode = extractField('Class/Item Code');
+                        data.description = extractField('Solicitation Description');
+
+                        if (!data.contactName || data.contactName.includes(':')) data.contactName = '';
+                        if (!data.contactNumber || data.contactNumber.includes(':')) data.contactNumber = '';
+                        if (!data.contactEmail || data.contactEmail.includes(':')) data.contactEmail = '';
+
+                        data.attachments = [];
+                        document.querySelectorAll('a').forEach(link => {
+                            const dataAction = link.getAttribute('data-action') || '';
+                            const dataHref = link.getAttribute('data-href') || '';
+                            const href = link.href || link.getAttribute('href') || '';
+                            const name = link.textContent.trim();
+
+                            if (dataAction === 'downloadURL' && dataHref) {
+                                data.attachments.push({
+                                    name: name || 'Attachment',
+                                    url: dataHref.startsWith('http') ? dataHref : `https://www.txsmartbuy.gov${dataHref}`
+                                });
+                            } else if (href && (href.includes('ESBD_') || href.includes('.pdf') || href.includes('.docx') || href.includes('.doc') || href.includes('.xlsx') || href.includes('.xls'))) {
+                                data.attachments.push({ name: name || 'Attachment', url: href });
+                            }
+                        });
+
+                        return data;
+                    });
+
+                    await browser.close();
+
+                    results.push({ ...solicitation, ...detailData });
+                    totalProcessed++;
+                    consecutiveTimeouts = 0; // Reset on success
+                    success = true;
+
+                } catch (error) {
+                    console.error(`Error fetching details for ${solicitationId}:`, error.message);
+
+                    // Check if this is a timeout error
+                    if (isTimeoutError(error.message)) {
+                        consecutiveTimeouts++;
+                        console.log(`Timeout detected. Consecutive timeouts: ${consecutiveTimeouts}`);
+
+                        // Rotate proxy after timeout
+                        rotateProxy();
+
+                        retryCount++;
+                        if (retryCount < MAX_RETRIES) {
+                            console.log(`Retrying with new proxy...`);
+                            try { if (browser) await browser.close(); } catch (e) {}
+                            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait before retry
+                            continue; // Retry with new proxy
+                        }
+                    }
+
+                    // If not timeout or max retries reached, record error
+                    errors.push({ solicitationId, error: error.message });
+                    results.push({ ...solicitation, detailError: error.message });
+                    try { if (browser) await browser.close(); } catch (e) {}
+                    break; // Exit retry loop
+                }
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        console.log(`Complete! Processed: ${totalProcessed}/${solicitationsToProcess.length}, Errors: ${errors.length}`);
+
+        res.json({
+            success: true,
+            timestamp: new Date().toISOString(),
+            page,
+            totalSolicitations: solicitations.length,
+            processedCount: solicitationsToProcess.length,
+            successCount: totalProcessed,
+            errorCount: errors.length,
+            results,
+            errors: errors.length > 0 ? errors : undefined
+        });
+
+    } catch (error) {
+        console.error(`Fatal error:`, error.message);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            timestamp: new Date().toISOString(),
+            partialResults: results.length > 0 ? results : undefined
+        });
+    }
+});
+
 app.listen(PORT, () => {
     console.log('='.repeat(80));
     console.log('Scraper API');
@@ -465,5 +731,6 @@ app.listen(PORT, () => {
     console.log(`Scrape NYSCR: http://localhost:${PORT}/scrape-nyscr?startnum=121`);
     console.log(`Scrape TX SmartBuy List: http://localhost:${PORT}/scrape-txsmartbuy-list?page=2191`);
     console.log(`Scrape TX SmartBuy Detail: http://localhost:${PORT}/scrape-txsmartbuy-detail?id=RFP-19-DT-003`);
+    console.log(`Scrape TX SmartBuy Complete: http://localhost:${PORT}/scrape-txsmartbuy-complete?page=1`);
     console.log('='.repeat(80));
 });
