@@ -43,6 +43,24 @@ function isTimeoutError(errorMessage) {
     );
 }
 
+// Check if date is older than 6 months
+function isOlderThan6Months(dateString) {
+    if (!dateString) return false;
+
+    try {
+        // Parse the date string (format: "8/23/2019 1:02 pm")
+        const lastUpdated = new Date(dateString);
+        const now = new Date();
+        const sixMonthsAgo = new Date();
+        sixMonthsAgo.setMonth(now.getMonth() - 6);
+
+        return lastUpdated < sixMonthsAgo;
+    } catch (error) {
+        console.error(`Error parsing date: ${dateString}`, error.message);
+        return false;
+    }
+}
+
 // Health check
 app.get('/', (req, res) => {
     res.json({
@@ -573,8 +591,22 @@ app.get('/scrape-txsmartbuy-complete', async (req, res) => {
         await browser.close();
         console.log(`Found ${solicitations.length} solicitations`);
 
-        const solicitationsToProcess = limit ? solicitations.slice(0, limit) : solicitations;
+        // Filter solicitations by date (skip those older than 6 months)
+        const filteredSolicitations = solicitations.filter(sol => {
+            const isOld = isOlderThan6Months(sol.lastUpdated);
+            if (isOld) {
+                console.log(`Skipping ${sol.solicitationId}: Data is older than 6 months (Last Updated: ${sol.lastUpdated})`);
+            }
+            return !isOld;
+        });
+
+        console.log(`After filtering: ${filteredSolicitations.length}/${solicitations.length} solicitations (${solicitations.length - filteredSolicitations.length} skipped as older than 6 months)`);
+
+        const solicitationsToProcess = limit ? filteredSolicitations.slice(0, limit) : filteredSolicitations;
         console.log(`Processing ${solicitationsToProcess.length} solicitations with proxy...`);
+
+        // Track skipped old records
+        const skippedOldRecords = solicitations.filter(sol => isOlderThan6Months(sol.lastUpdated));
 
         // Step 2: Fetch details for each solicitation with proxy
         let consecutiveTimeouts = 0;
@@ -699,11 +731,27 @@ app.get('/scrape-txsmartbuy-complete', async (req, res) => {
 
         console.log(`Complete! Processed: ${totalProcessed}/${solicitationsToProcess.length}, Errors: ${errors.length}`);
 
+        // If all records are older than 6 months, return a simple message
+        if (filteredSolicitations.length === 0) {
+            return res.json({
+                success: true,
+                timestamp: new Date().toISOString(),
+                page,
+                message: 'All records on this page are older than 6 months',
+                totalSolicitations: solicitations.length,
+                skippedOldCount: skippedOldRecords.length
+            });
+        }
+
+        // Otherwise, return only the records that are NOT older than 6 months
         res.json({
             success: true,
             timestamp: new Date().toISOString(),
             page,
+            initialListing: filteredSolicitations, // Only fresh records (not older than 6 months)
             totalSolicitations: solicitations.length,
+            filteredCount: filteredSolicitations.length,
+            skippedOldCount: skippedOldRecords.length,
             processedCount: solicitationsToProcess.length,
             successCount: totalProcessed,
             errorCount: errors.length,
